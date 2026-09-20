@@ -1,40 +1,78 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { isSupabaseConfigured, supabase } from './lib/supabase'
+import './admin.css'
+
+const currency = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' })
+const imageUrl = path => path ? supabase.storage.from('product-images').getPublicUrl(path).data.publicUrl : null
+const statusText = value => value.replaceAll('_', ' ')
+
+function AuthScreen({ onSignedIn }) {
+  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false)
+  async function submit(type) {
+    setBusy(true); setNotice('')
+    const { data, error } = type === 'signup' ? await supabase.auth.signUp({ email, password }) : await supabase.auth.signInWithPassword({ email, password })
+    setBusy(false)
+    if (error) return setNotice(error.message)
+    if (data.session) onSignedIn(data.session)
+    setNotice(type === 'signup' ? 'Account created. Check your email if confirmation is enabled, then sign in.' : 'Signed in successfully.')
+  }
+  return <main className="auth-page"><section className="auth-card"><p className="eyebrow">CLEAR WATER DELIVERY</p><h1>Fresh water, right at your door.</h1><p className="lead">Order water cans and bottles in a few simple taps.</p><form onSubmit={e => { e.preventDefault(); submit('signin') }}><label>Email address<input type="email" autoComplete="email" value={email} onChange={e => setEmail(e.target.value)} required /></label><label>Password<input type="password" autoComplete="current-password" minLength="6" value={password} onChange={e => setPassword(e.target.value)} required /></label><button disabled={busy}>{busy ? 'Please wait…' : 'Sign in'}</button></form><div className="or"><span />or<span /></div><button className="secondary full" disabled={busy} onClick={() => submit('signup')}>Create a customer account</button>{notice && <p className="notice">{notice}</p>}<p className="fine-print">Phone OTP will be available before launch. Email login is used while we build and test securely.</p></section></main>
+}
+
+function HoldingScreen({ role, onSignOut }) {
+  return <main className="holding"><p className="eyebrow">CLEAR WATER DELIVERY</p><h1>{role === 'admin' ? 'Admin workspace' : 'Rider workspace'}</h1><p>Your secure {role} account is ready. Its dedicated tools arrive in the next phase for this role.</p><button className="secondary" onClick={onSignOut}>Sign out</button></main>
+}
+
+function Cart({ cart, products, updateQuantity, onCheckout, onClose }) {
+  const items = products.filter(p => cart[p.id]).map(p => ({ ...p, quantity: cart[p.id] })); const total = items.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0)
+  return <aside className="cart-panel"><div className="cart-heading"><h2>Your cart</h2><button className="icon-button" aria-label="Close cart" onClick={onClose}>×</button></div>{items.length === 0 ? <p className="empty-copy">Your cart is empty. Add water products to get started.</p> : <><div className="cart-lines">{items.map(item => <div className="cart-line" key={item.id}><div><strong>{item.name}</strong><small>{currency.format(item.price)} each</small></div><div className="quantity"><button onClick={() => updateQuantity(item.id, item.quantity - 1)}>−</button><span>{item.quantity}</span><button onClick={() => updateQuantity(item.id, item.quantity + 1)}>+</button></div></div>)}</div><div className="cart-total"><span>Subtotal</span><strong>{currency.format(total)}</strong></div><button className="full" onClick={onCheckout}>Continue to delivery details</button></>}</aside>
+}
+
+function Checkout({ cart, products, profile, onClose, onPlaced }) {
+  const [form, setForm] = useState({ delivery_name: profile?.full_name || '', delivery_phone: profile?.phone || '', delivery_address: profile?.default_address || '', notes: '' }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const items = products.filter(p => cart[p.id]).map(p => ({ product_id: p.id, quantity: cart[p.id] })); const total = products.filter(p => cart[p.id]).reduce((sum, p) => sum + Number(p.price) * cart[p.id], 0)
+  async function placeOrder(e) {
+    e.preventDefault(); setBusy(true); setError('')
+    const { data, error: rpcError } = await supabase.rpc('create_order', { items, ...form })
+    if (rpcError) { setBusy(false); return setError(rpcError.message) }
+    const { data: { user } } = await supabase.auth.getUser()
+    await supabase.from('profiles').update({ full_name: form.delivery_name, phone: form.delivery_phone, default_address: form.delivery_address }).eq('id', user.id)
+    setBusy(false); onPlaced(data)
+  }
+  return <div className="modal-backdrop"><section className="modal"><div className="cart-heading"><div><p className="eyebrow">CHECKOUT</p><h2>Delivery details</h2></div><button className="icon-button" onClick={onClose}>×</button></div><p className="checkout-total">Order total <strong>{currency.format(total)}</strong></p><form onSubmit={placeOrder}><label>Full name<input name="delivery_name" value={form.delivery_name} onChange={e => setForm({ ...form, [e.target.name]: e.target.value })} required /></label><label>Mobile number<input name="delivery_phone" type="tel" value={form.delivery_phone} onChange={e => setForm({ ...form, [e.target.name]: e.target.value })} required /></label><label>Delivery address<textarea name="delivery_address" rows="3" value={form.delivery_address} onChange={e => setForm({ ...form, [e.target.name]: e.target.value })} required /></label><label>Delivery notes <span className="optional">(optional)</span><textarea name="notes" rows="2" value={form.notes} onChange={e => setForm({ ...form, [e.target.name]: e.target.value })} placeholder="Flat number, landmark, or preferred time" /></label><p className="payment-note">Payment will be collected later. Online payment and Cash on Delivery arrive in Phase 6.</p>{error && <p className="error">{error}</p>}<button className="full" disabled={busy}>{busy ? 'Placing order…' : 'Place order'}</button></form></section></div>
+}
+
+function CustomerScreen({ profile, onSignOut }) {
+  const [products, setProducts] = useState([]); const [orders, setOrders] = useState([]); const [cart, setCart] = useState(() => JSON.parse(localStorage.getItem('clear-water-cart') || '{}')); const [cartOpen, setCartOpen] = useState(false); const [checkoutOpen, setCheckoutOpen] = useState(false); const [loading, setLoading] = useState(true); const [notice, setNotice] = useState('')
+  const cartCount = useMemo(() => Object.values(cart).reduce((sum, q) => sum + q, 0), [cart])
+  useEffect(() => { localStorage.setItem('clear-water-cart', JSON.stringify(cart)) }, [cart]); useEffect(() => { loadData() }, [])
+  async function loadData() { setLoading(true); const [productsResult, ordersResult] = await Promise.all([supabase.from('products').select('id,name,description,price,unit_label,image_path').eq('is_active', true).order('created_at', { ascending: false }), supabase.from('orders').select('id,status,total,created_at,order_items(product_name,quantity,unit_price)').order('created_at', { ascending: false })]); setProducts(productsResult.data || []); setOrders(ordersResult.data || []); setNotice(productsResult.error?.message || ordersResult.error?.message || ''); setLoading(false) }
+  function updateQuantity(id, quantity) { setCart(current => { const next = { ...current }; if (quantity <= 0) delete next[id]; else next[id] = quantity; return next }) }
+  function placed(id) { setCart({}); setCheckoutOpen(false); setCartOpen(false); setNotice(`Order ${id.slice(0, 8).toUpperCase()} was placed. We will assign a rider shortly.`); loadData() }
+  const ProductCard = ({ product }) => { const quantity = cart[product.id] || 0; return <article className="product-card"><div className="product-image">{product.image_path ? <img src={imageUrl(product.image_path)} alt={product.name} /> : <span>💧</span>}</div><div className="product-content"><p className="unit">{product.unit_label}</p><h3>{product.name}</h3><p>{product.description || 'Fresh, reliable drinking water.'}</p><div className="product-bottom"><strong>{currency.format(product.price)}</strong>{quantity === 0 ? <button onClick={() => updateQuantity(product.id, 1)}>Add to cart</button> : <div className="product-quantity"><button aria-label={`Remove one ${product.name}`} onClick={() => updateQuantity(product.id, quantity - 1)}>−</button><b>{quantity}</b><button aria-label={`Add one ${product.name}`} onClick={() => updateQuantity(product.id, quantity + 1)}>+</button></div>}</div></div></article> }
+  return <main className="store"><header className="topbar"><a className="brand" href="#top"><span className="brand-mark">≈</span><span>Clear Water<small>DELIVERY</small></span></a><nav><a href="#products">Shop</a><a href="#orders">My orders</a><button className="cart-button" onClick={() => setCartOpen(true)}>Cart <b>{cartCount}</b></button><button className="text-button" onClick={onSignOut}>Sign out</button></nav></header><section className="hero" id="top"><div><p className="eyebrow">PURE. SIMPLE. RELIABLE.</p><h1>Better water for every day.</h1><p>Water cans and bottles delivered to your home or workplace.</p><a className="button-link" href="#products">Browse products</a></div><div className="hero-art" aria-hidden="true"><span>💧</span><i /><i /><i /></div></section><section className="section" id="products"><div className="section-heading"><div><p className="eyebrow">SHOP</p><h2>Water, delivered fresh</h2></div><p>Secure ordering. Live stock is confirmed at checkout.</p></div>{notice && <p className="notice">{notice}</p>}{loading ? <p>Loading products…</p> : products.length === 0 ? <div className="empty-state"><h3>Products are being added</h3><p>Your Clear Water catalogue will appear here soon. The admin product manager is built in Phase 3.</p></div> : <div className="product-grid">{products.map(product => <ProductCard key={product.id} product={product} />)}</div>}</section><section className="section orders-section" id="orders"><div className="section-heading"><div><p className="eyebrow">TRACKING</p><h2>My recent orders</h2></div></div>{orders.length === 0 ? <p className="empty-copy">No orders yet. Your placed orders will appear here.</p> : <div className="orders-list">{orders.map(order => <article className="order-card" key={order.id}><div><span className={`status status-${order.status}`}>{statusText(order.status)}</span><h3>Order #{order.id.slice(0, 8).toUpperCase()}</h3><p>{new Date(order.created_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} · {order.order_items.map(i => `${i.quantity} × ${i.product_name}`).join(', ')}</p></div><strong>{currency.format(order.total)}</strong></article>)}</div>}</section><footer>Clear Water Delivery · Safe water, delivered simply.</footer>{cartOpen && <div className="cart-backdrop" onClick={() => setCartOpen(false)}><div onClick={e => e.stopPropagation()}><Cart cart={cart} products={products} updateQuantity={updateQuantity} onCheckout={() => { setCartOpen(false); setCheckoutOpen(true) }} onClose={() => setCartOpen(false)} /></div></div>}{checkoutOpen && <Checkout cart={cart} products={products} profile={profile} onClose={() => setCheckoutOpen(false)} onPlaced={placed} />}</main>
+}
+
+function AdminScreen({ onSignOut }) {
+  const [products, setProducts] = useState([]); const [orders, setOrders] = useState([]); const [riders, setRiders] = useState([]); const [notice, setNotice] = useState(''); const [product, setProduct] = useState({ name: '', description: '', price: '', unit: '20 litre can', stock: '0', reorder: '5' }); const [file, setFile] = useState(null)
+  async function load() { const [p, o, r] = await Promise.all([supabase.from('products').select('id,name,description,price,unit_label,image_path,is_active,inventory(quantity,reserved_quantity,reorder_level)').order('created_at', { ascending: false }), supabase.from('orders').select('id,status,total,customer_id,delivery_name,delivery_phone,delivery_address,assigned_rider_id,priority,deliver_before,queue_position,order_items(product_name,quantity)').order('created_at', { ascending: false }), supabase.from('profiles').select('id,full_name,phone,is_active').eq('role', 'rider').eq('is_active', true)]); setProducts(p.data || []); setOrders(o.data || []); setRiders(r.data || []); setNotice(p.error?.message || o.error?.message || r.error?.message || '') }
+  useEffect(() => { load() }, [])
+  async function createProduct(e) { e.preventDefault(); setNotice(''); let path = ''; if (file) { path = `${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '-')}`; const { error } = await supabase.storage.from('product-images').upload(path, file); if (error) return setNotice(error.message) } const { error } = await supabase.rpc('admin_create_product', { product_name: product.name, product_description: product.description, product_price: Number(product.price), product_unit_label: product.unit, product_image_path: path, opening_quantity: Number(product.stock), product_reorder_level: Number(product.reorder) }); if (error) return setNotice(error.message); setProduct({ name: '', description: '', price: '', unit: '20 litre can', stock: '0', reorder: '5' }); setFile(null); setNotice('Product created successfully.'); load() }
+  async function updateStock(item, quantity) { const { error } = await supabase.from('inventory').update({ quantity: Number(quantity) }).eq('product_id', item.id); setNotice(error ? error.message : 'Stock saved.'); if (!error) load() }
+  async function assign(orderId, values) { const { error } = await supabase.rpc('assign_order', { order_uuid: orderId, rider_uuid: values.rider, new_priority: values.priority, new_deliver_before: values.before || null, new_queue_position: Number(values.position || 0) }); setNotice(error ? error.message : 'Order assignment saved.'); if (!error) load() }
+  return <main className="admin"><header className="topbar"><a className="brand" href="#top"><span className="brand-mark">≈</span><span>Clear Water<small>ADMIN</small></span></a><nav><button className="text-button" onClick={onSignOut}>Sign out</button></nav></header><div className="admin-main" id="top"><p className="eyebrow">ADMIN DASHBOARD</p><h1>Manage Clear Water</h1><p className="lead">Products, live stock, orders, and rider assignment in one place.</p>{notice && <p className="notice">{notice}</p>}<div className="admin-grid"><div className="metric"><span>Products</span><strong>{products.filter(p => p.is_active).length}</strong></div><div className="metric"><span>Open orders</span><strong>{orders.filter(o => !['delivered', 'cancelled'].includes(o.status)).length}</strong></div><div className="metric"><span>Active riders</span><strong>{riders.length}</strong></div></div><div className="admin-layout"><section className="admin-card"><p className="eyebrow">NEW PRODUCT</p><h2>Add product</h2><p className="fine-print">Upload a real product photo directly to Supabase Storage.</p><form onSubmit={createProduct}><label>Name<input value={product.name} onChange={e => setProduct({ ...product, name: e.target.value })} required /></label><label>Description<textarea rows="2" value={product.description} onChange={e => setProduct({ ...product, description: e.target.value })} /></label><label>Price (₹)<input type="number" min="0" step="0.01" value={product.price} onChange={e => setProduct({ ...product, price: e.target.value })} required /></label><label>Unit<label><input value={product.unit} onChange={e => setProduct({ ...product, unit: e.target.value })} required /></label></label><label>Opening stock<input type="number" min="0" value={product.stock} onChange={e => setProduct({ ...product, stock: e.target.value })} required /></label><label>Low-stock alert level<input type="number" min="0" value={product.reorder} onChange={e => setProduct({ ...product, reorder: e.target.value })} required /></label><label>Product photo<input type="file" accept="image/*" onChange={e => setFile(e.target.files?.[0] || null)} /></label><button>Create product</button></form></section><section className="admin-card"><p className="eyebrow">CATALOGUE & INVENTORY</p><h2>Products</h2>{products.length === 0 ? <p className="empty-copy">No products yet.</p> : products.map(item => { const stock = item.inventory?.[0]; return <article className="product-admin" key={item.id}>{item.image_path ? <img src={imageUrl(item.image_path)} alt="" /> : <span className="image-fallback">💧</span>}<div><strong>{item.name}</strong><small>{currency.format(item.price)} · {stock?.reserved_quantity || 0} reserved</small></div><div className="stock-editor"><input type="number" min={stock?.reserved_quantity || 0} defaultValue={stock?.quantity || 0} id={`stock-${item.id}`} /><button onClick={() => updateStock(item, document.getElementById(`stock-${item.id}`).value)}>Save</button></div></article> })}</section></div><section className="admin-card"><p className="eyebrow">ORDER MANAGEMENT</p><h2>Orders</h2>{orders.length === 0 ? <p className="empty-copy">No customer orders yet.</p> : orders.map(order => <OrderAssignment key={order.id} order={order} riders={riders} onAssign={assign} />)}</section></div></main>
+}
+
+function OrderAssignment({ order, riders, onAssign }) { const [values, setValues] = useState({ rider: order.assigned_rider_id || '', priority: order.priority || 'normal', before: order.deliver_before ? order.deliver_before.slice(0, 16) : '', position: order.queue_position || 0 }); return <article className="admin-order"><div className="admin-order-head"><div><span className={`status status-${order.status}`}>{statusText(order.status)}</span><h3>#{order.id.slice(0, 8).toUpperCase()} · {order.delivery_name}</h3><small>{order.delivery_phone} · {order.order_items.map(i => `${i.quantity} × ${i.product_name}`).join(', ')}</small></div><strong>{currency.format(order.total)}</strong></div>{!['delivered', 'cancelled'].includes(order.status) && <div className="assign-row"><select value={values.rider} onChange={e => setValues({ ...values, rider: e.target.value })}><option value="">Choose rider</option>{riders.map(r => <option value={r.id} key={r.id}>{r.full_name || r.phone || 'Unnamed rider'}</option>)}</select><select value={values.priority} onChange={e => setValues({ ...values, priority: e.target.value })}><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select><input type="datetime-local" value={values.before} onChange={e => setValues({ ...values, before: e.target.value })} /><input type="number" min="0" title="Queue position" value={values.position} onChange={e => setValues({ ...values, position: e.target.value })} /><button disabled={!values.rider} onClick={() => onAssign(order.id, values)}>Save assignment</button></div>}</article> }
 
 export default function App() {
-  const [session, setSession] = useState(null)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [message, setMessage] = useState('')
-
-  useEffect(() => {
-    if (!supabase) return
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession))
-    return () => listener.subscription.unsubscribe()
-  }, [])
-
-  async function signUp(event) {
-    event.preventDefault()
-    setMessage('')
-    const { error } = await supabase.auth.signUp({ email, password })
-    setMessage(error ? error.message : 'Account created. Check your email to confirm it, then sign in.')
-  }
-
-  async function signIn(event) {
-    event.preventDefault()
-    setMessage('')
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    setMessage(error ? error.message : 'Signed in successfully.')
-  }
-
-  if (!isSupabaseConfigured) {
-    return <main className="shell"><h1>ClearDrop Water</h1><p>Phase 1 is ready. Add your Supabase values to <code>.env.local</code>, then restart the site.</p></main>
-  }
-
-  if (session) {
-    return <main className="shell"><h1>Welcome to ClearDrop Water</h1><p>You are signed in as {session.user.email}.</p><p>Customer ordering, admin tools, and rider delivery screens arrive in the next phases.</p><button onClick={() => supabase.auth.signOut()}>Sign out</button></main>
-  }
-
-  return <main className="shell"><h1>ClearDrop Water</h1><p>Safe water, delivered simply.</p><div className="forms"><form onSubmit={signIn}><h2>Sign in</h2><label>Email<input type="email" value={email} onChange={e => setEmail(e.target.value)} required /></label><label>Password<input type="password" minLength="6" value={password} onChange={e => setPassword(e.target.value)} required /></label><button>Sign in</button></form><form onSubmit={signUp}><h2>New customer?</h2><p>Use the same email and password fields, then create an account.</p><button>Create account</button></form></div>{message && <p className="message">{message}</p>}</main>
+  const [session, setSession] = useState(null); const [profile, setProfile] = useState(null); const [loadingProfile, setLoadingProfile] = useState(true)
+  useEffect(() => { if (!supabase) return; supabase.auth.getSession().then(({ data }) => setSession(data.session)); const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => setSession(next)); return () => listener.subscription.unsubscribe() }, [])
+  useEffect(() => { if (!session) { setProfile(null); setLoadingProfile(false); return } setLoadingProfile(true); supabase.from('profiles').select('id,role,full_name,phone,default_address').eq('id', session.user.id).single().then(({ data }) => { setProfile(data); setLoadingProfile(false) }) }, [session])
+  if (!isSupabaseConfigured) return <main className="holding"><h1>Clear Water</h1><p>Add Supabase values to <code>.env.local</code>, then restart the website.</p></main>
+  if (!session) return <AuthScreen onSignedIn={setSession} />
+  if (loadingProfile) return <main className="holding"><p>Preparing your secure account…</p></main>
+  if (profile?.role === 'customer') return <CustomerScreen profile={profile} onSignOut={() => supabase.auth.signOut()} />
+  if (profile?.role === 'admin') return <AdminScreen onSignOut={() => supabase.auth.signOut()} />
+  return <HoldingScreen role={profile?.role || 'customer'} onSignOut={() => supabase.auth.signOut()} />
 }
